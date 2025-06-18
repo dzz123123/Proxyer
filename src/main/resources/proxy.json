@@ -1,0 +1,7 @@
+{
+  "环境1": [{"localPort": 10001,"remotePort":  22, "remoteHost": "192.168.18.138", "desc": "环境1 节点1 ssh"},
+    {"localPort": 10001,"remotePort":  22, "remoteHost": "192.168.18.149", "desc": "环境1 节点2 ssh"}],
+  "环境2": [],
+  "环境3": []
+
+}
