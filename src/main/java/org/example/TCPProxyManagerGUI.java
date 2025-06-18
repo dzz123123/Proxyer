@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -33,7 +34,7 @@ public class TCPProxyManagerGUI extends JFrame {
     private JLabel titleLabel;
     private JTable proxyTable;
     private DefaultTableModel tableModel;
-    private JButton startButton, stopButton, startAllButton, stopAllButton;
+    private JButton startButton, stopButton, startAllButton, stopAllButton, addMappingButton;
     private JTextArea logArea;
     private JScrollPane logScrollPane;
     private String currentEnvironment;
@@ -43,6 +44,9 @@ public class TCPProxyManagerGUI extends JFrame {
         super("TCP 代理管理器");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(900, 700);
+
+        // 设置字符编码
+        System.setProperty("file.encoding", "UTF-8");
 
         loadConfig();
         initComponents();
@@ -129,6 +133,65 @@ public class TCPProxyManagerGUI extends JFrame {
         }
     }
 
+    private void saveCurrentEnvironment() {
+        if (currentEnvironment == null) {
+            logError("请先选择一个环境");
+            return;
+        }
+
+        try {
+            // 从表格中读取当前数据更新到environments
+            List<ProxyConfig> updatedConfigs = new ArrayList<>();
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                String desc = (String) tableModel.getValueAt(i, 1);
+                String remoteHost = (String) tableModel.getValueAt(i, 2);
+                Object remotePortObj = tableModel.getValueAt(i, 3);
+                Object localPortObj = tableModel.getValueAt(i, 4);
+
+                // 处理可能的空值和类型转换
+                int remotePort = 0;
+                int localPort = 0;
+
+                if (remotePortObj instanceof Integer) {
+                    remotePort = (Integer) remotePortObj;
+                } else if (remotePortObj instanceof String) {
+                    try {
+                        remotePort = Integer.parseInt((String) remotePortObj);
+                    } catch (NumberFormatException e) {
+                        logError("第" + (i + 1) + "行远程端口格式错误: " + remotePortObj);
+                        continue;
+                    }
+                }
+
+                if (localPortObj instanceof Integer) {
+                    localPort = (Integer) localPortObj;
+                } else if (localPortObj instanceof String) {
+                    try {
+                        localPort = Integer.parseInt((String) localPortObj);
+                    } catch (NumberFormatException e) {
+                        logError("第" + (i + 1) + "行本地端口格式错误: " + localPortObj);
+                        continue;
+                    }
+                }
+
+                if (desc != null && !desc.trim().isEmpty() &&
+                        remoteHost != null && !remoteHost.trim().isEmpty() &&
+                        remotePort > 0 && localPort > 0) {
+                    updatedConfigs.add(new ProxyConfig(localPort, remoteHost.trim(), remotePort, desc.trim()));
+                }
+            }
+
+            environments.put(currentEnvironment, updatedConfigs);
+            saveConfig();
+            logMessage("环境 '" + currentEnvironment + "' 配置已保存");
+
+            // 重新加载当前环境以刷新显示
+            switchEnvironment(currentEnvironment);
+        } catch (Exception e) {
+            logError("保存环境配置失败: " + e.getMessage());
+        }
+    }
+
     private void initComponents() {
         titleLabel = new JLabel("选择环境", JLabel.CENTER);
         titleLabel.setFont(new Font("微软雅黑", Font.BOLD, 24));
@@ -154,6 +217,13 @@ public class TCPProxyManagerGUI extends JFrame {
         deleteEnvironmentMenu.add(deleteEnvItem);
         menuBar.add(deleteEnvironmentMenu);
 
+        // 保存菜单
+        JMenu saveMenu = new JMenu("保存");
+        JMenuItem saveItem = new JMenuItem("保存当前环境");
+        saveItem.addActionListener(e -> saveCurrentEnvironment());
+        saveMenu.add(saveItem);
+        menuBar.add(saveMenu);
+
         setJMenuBar(menuBar);
 
         String[] columnNames = {"选择", "描述", "远程地址", "远程端口", "本地端口", "状态"};
@@ -167,7 +237,15 @@ public class TCPProxyManagerGUI extends JFrame {
 
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column == 0;
+                if (column == 0) return true; // 选择列总是可编辑
+
+                // 对于非运行状态的行，允许编辑描述、远程地址、远程端口、本地端口
+                if (column >= 1 && column <= 4) {
+                    ProxyState state = (ProxyState) getValueAt(row, 5);
+                    return state != ProxyState.RUNNING;
+                }
+
+                return false;
             }
         };
 
@@ -192,10 +270,11 @@ public class TCPProxyManagerGUI extends JFrame {
 
         proxyTable.getColumnModel().getColumn(0).setHeaderRenderer((table, value, isSelected, hasFocus, row, column) -> headerCheckBox);
 
-        // 初始化日志区域
+        // 初始化日志区域，解决中文乱码问题
         logArea = new JTextArea();
         logArea.setEditable(false);
-        logArea.setFont(new Font("Consolas", Font.PLAIN, 12));
+        // 使用支持中文的字体
+        logArea.setFont(new Font("Microsoft YaHei", Font.PLAIN, 12));
         logArea.setBackground(new Color(245, 245, 245));
         logScrollPane = new JScrollPane(logArea);
         logScrollPane.setPreferredSize(new Dimension(0, 150));
@@ -213,11 +292,34 @@ public class TCPProxyManagerGUI extends JFrame {
         stopAllButton = new JButton("全部停止");
         stopAllButton.addActionListener(e -> stopAllProxies());
 
+        addMappingButton = new JButton("添加映射");
+        addMappingButton.addActionListener(this::addMapping);
+
         Font buttonFont = new Font("微软雅黑", Font.PLAIN, 16);
         startButton.setFont(buttonFont);
         stopButton.setFont(buttonFont);
         startAllButton.setFont(buttonFont);
         stopAllButton.setFont(buttonFont);
+        addMappingButton.setFont(buttonFont);
+    }
+
+    private void addMapping(ActionEvent e) {
+        if (currentEnvironment == null) {
+            logError("请先选择一个环境");
+            return;
+        }
+
+        // 添加新行到表格
+        tableModel.addRow(new Object[]{
+                Boolean.FALSE,
+                "未命名",
+                "",
+                "",
+                "",
+                ProxyState.INIT
+        });
+
+        logMessage("已添加新的映射条目，请编辑后保存");
     }
 
     private void updateEnvironmentMenu(JMenu environmentMenu) {
@@ -264,6 +366,8 @@ public class TCPProxyManagerGUI extends JFrame {
                 JOptionPane.YES_NO_OPTION);
 
         if (confirm == JOptionPane.YES_OPTION) {
+            String deletedEnv = currentEnvironment;
+
             // 先停止当前环境的所有代理
             stopAllProxies();
 
@@ -284,7 +388,7 @@ public class TCPProxyManagerGUI extends JFrame {
             tableModel.setRowCount(0);
             activeProxies.clear();
 
-            logMessage("成功删除环境: " + currentEnvironment);
+            logMessage("成功删除环境: " + deletedEnv);
         }
     }
 
@@ -299,11 +403,13 @@ public class TCPProxyManagerGUI extends JFrame {
         JScrollPane tableScrollPane = new JScrollPane(proxyTable);
         tableScrollPane.setBorder(BorderFactory.createTitledBorder("代理状态"));
 
-        JPanel buttonPanel = new JPanel(new GridLayout(1, 4, 10, 0));
+        // 修改按钮面板，添加"添加映射"按钮
+        JPanel buttonPanel = new JPanel(new GridLayout(1, 5, 10, 0));
         buttonPanel.add(startButton);
         buttonPanel.add(stopButton);
         buttonPanel.add(startAllButton);
         buttonPanel.add(stopAllButton);
+        buttonPanel.add(addMappingButton);
 
         // 中间面板包含表格和日志
         JPanel centerPanel = new JPanel(new BorderLayout(0, 10));
@@ -440,31 +546,49 @@ public class TCPProxyManagerGUI extends JFrame {
         if (rowIndex >= 0 && rowIndex < tableModel.getRowCount()) {
             String desc = (String) tableModel.getValueAt(rowIndex, 1);
             String remoteHost = (String) tableModel.getValueAt(rowIndex, 2);
-            int remotePort = (Integer) tableModel.getValueAt(rowIndex, 3);
-            int localPort = (Integer) tableModel.getValueAt(rowIndex, 4);
+            Object remotePortObj = tableModel.getValueAt(rowIndex, 3);
+            Object localPortObj = tableModel.getValueAt(rowIndex, 4);
 
-            for (ProxyConfig config : activeProxies.keySet()) {
-                if (config.getDescription().equals(desc) &&
-                        config.getRemoteHost().equals(remoteHost) &&
-                        config.getRemotePort() == remotePort &&
-                        config.getLocalPort() == localPort) {
-                    return config;
-                }
+            // 处理可能的空值和字符串
+            if (desc == null || remoteHost == null || remotePortObj == null || localPortObj == null) {
+                return null;
+            }
+
+            try {
+                int remotePort = remotePortObj instanceof Integer ? (Integer) remotePortObj :
+                        Integer.parseInt(remotePortObj.toString());
+                int localPort = localPortObj instanceof Integer ? (Integer) localPortObj :
+                        Integer.parseInt(localPortObj.toString());
+
+                return new ProxyConfig(localPort, remoteHost, remotePort, desc);
+            } catch (NumberFormatException e) {
+                return null;
             }
         }
         return null;
     }
 
     private void startProxy(ProxyConfig config, int rowIndex) {
+        if (config == null) {
+            logError("第" + (rowIndex + 1) + "行配置信息不完整，无法启动");
+            return;
+        }
+
         ManagedProxy proxy = activeProxies.get(config);
-        if (proxy != null && proxy.getState() != ProxyState.RUNNING) {
+        if (proxy == null) {
+            proxy = new ManagedProxy(config);
+            activeProxies.put(config, proxy);
+        }
+
+        if (proxy.getState() != ProxyState.RUNNING) {
             proxy.clear();
+            final ManagedProxy finalProxy = proxy;  // 创建final变量供lambda使用
             executor.execute(() -> {
                 try {
                     logMessage("正在启动代理: " + config.getDescription() + " (本地端口:" + config.getLocalPort() + ")");
-                    proxy.start();
+                    finalProxy.start();
                 } catch (Exception e) {
-                    if (proxy.isManualStop()) {
+                    if (finalProxy.isManualStop()) {
                         logMessage("代理已停止: " + config.getDescription());
                     } else {
                         logError("启动代理失败 [" + config.getDescription() + "]: " + e.getMessage());
@@ -474,7 +598,12 @@ public class TCPProxyManagerGUI extends JFrame {
         }
     }
 
+
     private void stopProxy(ProxyConfig config, int rowIndex) {
+        if (config == null) {
+            return;
+        }
+
         ManagedProxy proxy = activeProxies.get(config);
         if (proxy != null) {
             proxy.stop();
@@ -493,6 +622,9 @@ public class TCPProxyManagerGUI extends JFrame {
     }
 
     public static void main(String[] args) {
+        // 设置系统编码为UTF-8
+        System.setProperty("file.encoding", "UTF-8");
+
         SwingUtilities.invokeLater(() -> {
             TCPProxyManagerGUI gui = new TCPProxyManagerGUI();
             gui.setVisible(true);
@@ -517,6 +649,22 @@ public class TCPProxyManagerGUI extends JFrame {
         public String getRemoteHost() { return remoteHost; }
         public int getRemotePort() { return remotePort; }
         public String getDescription() { return description; }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (obj == null || getClass() != obj.getClass()) return false;
+            ProxyConfig that = (ProxyConfig) obj;
+            return localPort == that.localPort &&
+                    remotePort == that.remotePort &&
+                    Objects.equals(remoteHost, that.remoteHost) &&
+                    Objects.equals(description, that.description);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(localPort, remoteHost, remotePort, description);
+        }
     }
 
     // 带有状态管理的代理类
@@ -599,7 +747,7 @@ enum ProxyState {
     public Color getColor() { return color; }
 }
 
-// SimpleTCPProxy类保持不变，只是移除了一些输出
+// SimpleTCPProxy类保持不变
 class SimpleTCPProxy {
     private final int localPort;
     private final String remoteHost;
