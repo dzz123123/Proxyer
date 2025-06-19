@@ -10,11 +10,7 @@ import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellRenderer;
 import java.awt.*;
 import java.awt.event.ActionEvent;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
@@ -26,6 +22,7 @@ import java.util.concurrent.Executors;
 
 public class TCPProxyManagerGUI extends JFrame {
 
+    private static final String VERSION = "v1.1";  // 版本常量
     private static final String CONFIG_FILE = "config.json";
     private final Map<String, List<ProxyConfig>> environments = new HashMap<>();
     private final Map<ProxyConfig, ManagedProxy> activeProxies = new HashMap<>();
@@ -34,14 +31,14 @@ public class TCPProxyManagerGUI extends JFrame {
     private JLabel titleLabel;
     private JTable proxyTable;
     private DefaultTableModel tableModel;
-    private JButton startButton, stopButton, startAllButton, stopAllButton, addMappingButton;
+    private JButton startButton, stopButton, startAllButton, stopAllButton, addMappingButton, deleteMappingButton, renameEnvironmentButton;
     private JTextArea logArea;
     private JScrollPane logScrollPane;
     private String currentEnvironment;
     private javax.swing.Timer statusUpdateTimer;
 
     public TCPProxyManagerGUI() {
-        super("TCP 代理管理器");
+        super("TCP 代理管理器 " + VERSION);  // 修改窗口标题
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(900, 700);
 
@@ -81,8 +78,18 @@ public class TCPProxyManagerGUI extends JFrame {
     }
 
     private void loadConfig() {
-        try (FileReader reader = new FileReader(CONFIG_FILE)) {
-            JSONObject config = JSON.parseObject(reader);
+        try (InputStreamReader reader = new InputStreamReader(
+                new FileInputStream(CONFIG_FILE), StandardCharsets.UTF_8)) {
+
+            // 读取所有内容到字符串
+            StringBuilder sb = new StringBuilder();
+            char[] buffer = new char[8192];
+            int len;
+            while ((len = reader.read(buffer)) != -1) {
+                sb.append(buffer, 0, len);
+            }
+
+            JSONObject config = JSON.parseObject(sb.toString());
 
             for (Map.Entry<String, Object> entry : config.entrySet()) {
                 String env = entry.getKey();
@@ -124,7 +131,8 @@ public class TCPProxyManagerGUI extends JFrame {
                 config.put(entry.getKey(), proxies);
             }
 
-            try (FileWriter writer = new FileWriter(CONFIG_FILE)) {
+            try (OutputStreamWriter writer = new OutputStreamWriter(
+                    new FileOutputStream(CONFIG_FILE), StandardCharsets.UTF_8)) {
                 writer.write(config.toJSONString());
             }
             logMessage("配置文件保存成功");
@@ -192,6 +200,52 @@ public class TCPProxyManagerGUI extends JFrame {
         }
     }
 
+    private void saveCurrentEnvironmentToMemory() {
+        if (currentEnvironment == null) {
+            return;
+        }
+
+        List<ProxyConfig> updatedConfigs = new ArrayList<>();
+        for (int i = 0; i < tableModel.getRowCount(); i++) {
+            String desc = (String) tableModel.getValueAt(i, 1);
+            String remoteHost = (String) tableModel.getValueAt(i, 2);
+            Object remotePortObj = tableModel.getValueAt(i, 3);
+            Object localPortObj = tableModel.getValueAt(i, 4);
+
+            // 处理可能的空值和类型转换
+            int remotePort = 0;
+            int localPort = 0;
+
+            if (remotePortObj instanceof Integer) {
+                remotePort = (Integer) remotePortObj;
+            } else if (remotePortObj instanceof String) {
+                try {
+                    remotePort = Integer.parseInt((String) remotePortObj);
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+            }
+
+            if (localPortObj instanceof Integer) {
+                localPort = (Integer) localPortObj;
+            } else if (localPortObj instanceof String) {
+                try {
+                    localPort = Integer.parseInt((String) localPortObj);
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+            }
+
+            if (desc != null && !desc.trim().isEmpty() &&
+                    remoteHost != null && !remoteHost.trim().isEmpty() &&
+                    remotePort > 0 && localPort > 0) {
+                updatedConfigs.add(new ProxyConfig(localPort, remoteHost.trim(), remotePort, desc.trim()));
+            }
+        }
+
+        environments.put(currentEnvironment, updatedConfigs);
+    }
+
     private void initComponents() {
         titleLabel = new JLabel("选择环境", JLabel.CENTER);
         titleLabel.setFont(new Font("微软雅黑", Font.BOLD, 24));
@@ -223,6 +277,13 @@ public class TCPProxyManagerGUI extends JFrame {
         saveItem.addActionListener(e -> saveCurrentEnvironment());
         saveMenu.add(saveItem);
         menuBar.add(saveMenu);
+
+        // 关于菜单
+        JMenu aboutMenu = new JMenu("关于");
+        JMenuItem aboutItem = new JMenuItem("关于");
+        aboutItem.addActionListener(this::showAbout);
+        aboutMenu.add(aboutItem);
+        menuBar.add(aboutMenu);
 
         setJMenuBar(menuBar);
 
@@ -295,12 +356,21 @@ public class TCPProxyManagerGUI extends JFrame {
         addMappingButton = new JButton("添加映射");
         addMappingButton.addActionListener(this::addMapping);
 
+        // 添加新按钮
+        deleteMappingButton = new JButton("删除映射");
+        deleteMappingButton.addActionListener(this::deleteMapping);
+
+        renameEnvironmentButton = new JButton("环境重命名");
+        renameEnvironmentButton.addActionListener(this::renameEnvironment);
+
         Font buttonFont = new Font("微软雅黑", Font.PLAIN, 16);
         startButton.setFont(buttonFont);
         stopButton.setFont(buttonFont);
         startAllButton.setFont(buttonFont);
         stopAllButton.setFont(buttonFont);
         addMappingButton.setFont(buttonFont);
+        deleteMappingButton.setFont(buttonFont);
+        renameEnvironmentButton.setFont(buttonFont);
     }
 
     private void addMapping(ActionEvent e) {
@@ -320,6 +390,111 @@ public class TCPProxyManagerGUI extends JFrame {
         });
 
         logMessage("已添加新的映射条目，请编辑后保存");
+    }
+
+    private void deleteMapping(ActionEvent e) {
+        if (currentEnvironment == null) {
+            logError("请先选择一个环境");
+            return;
+        }
+
+        List<Integer> selectedRows = getCheckedRows();
+        if (selectedRows.isEmpty()) {
+            logError("请先选择要删除的映射");
+            return;
+        }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+                "确定要删除选中的 " + selectedRows.size() + " 个映射吗？",
+                "删除映射",
+                JOptionPane.YES_NO_OPTION);
+
+        if (confirm == JOptionPane.YES_OPTION) {
+            // 先停止选中的代理
+            for (int rowIndex : selectedRows) {
+                ProxyConfig config = getProxyConfigFromRow(rowIndex);
+                if (config != null) {
+                    ManagedProxy proxy = activeProxies.get(config);
+                    if (proxy != null) {
+                        proxy.stop();
+                        activeProxies.remove(config);
+                    }
+                }
+            }
+
+            // 从后往前删除，避免索引变化影响
+            Collections.sort(selectedRows, Collections.reverseOrder());
+            for (int rowIndex : selectedRows) {
+                tableModel.removeRow(rowIndex);
+            }
+
+            logMessage("已删除 " + selectedRows.size() + " 个映射，请保存环境配置");
+        }
+    }
+
+    private void renameEnvironment(ActionEvent e) {
+        if (currentEnvironment == null) {
+            logError("请先选择一个环境");
+            return;
+        }
+
+        String newName = (String) JOptionPane.showInputDialog(
+                this,
+                "请输入新的环境名称:",
+                "环境重命名",
+                JOptionPane.PLAIN_MESSAGE,
+                null,
+                null,
+                currentEnvironment
+        );
+
+        if (newName != null && !newName.trim().isEmpty()) {
+            newName = newName.trim();
+
+            if (newName.equals(currentEnvironment)) {
+                logMessage("环境名称未改变");
+                return;
+            }
+
+            if (environments.containsKey(newName)) {
+                logError("环境名称 '" + newName + "' 已存在，请选择其他名称");
+                return;
+            }
+
+            String oldName = currentEnvironment;
+
+            // 先保存当前环境的配置到内存
+            saveCurrentEnvironmentToMemory();
+
+            // 更新environments映射
+            List<ProxyConfig> configs = environments.get(oldName);
+            environments.remove(oldName);
+            environments.put(newName, configs);
+
+            // 立即保存到配置文件
+            saveConfig();
+
+            // 重新加载配置
+            environments.clear();
+            loadConfig();
+
+            // 更新菜单
+            JMenuBar menuBar = getJMenuBar();
+            if (menuBar != null) {
+                JMenu environmentMenu = menuBar.getMenu(0);
+                updateEnvironmentMenu(environmentMenu);
+            }
+
+            // 切换到新命名的环境
+            switchEnvironment(newName);
+
+            logMessage("环境已从 '" + oldName + "' 重命名为 '" + newName + "'");
+        }
+    }
+
+    private void showAbout(ActionEvent e) {
+        String aboutMessage = "author: dzz\ncreated at 25-6\nversion: " + VERSION;
+        JOptionPane.showMessageDialog(this, aboutMessage, "关于", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void updateEnvironmentMenu(JMenu environmentMenu) {
@@ -403,13 +578,15 @@ public class TCPProxyManagerGUI extends JFrame {
         JScrollPane tableScrollPane = new JScrollPane(proxyTable);
         tableScrollPane.setBorder(BorderFactory.createTitledBorder("代理状态"));
 
-        // 修改按钮面板，添加"添加映射"按钮
-        JPanel buttonPanel = new JPanel(new GridLayout(1, 5, 10, 0));
+        // 修改按钮面板，增加到7个按钮
+        JPanel buttonPanel = new JPanel(new GridLayout(1, 7, 10, 0));
         buttonPanel.add(startButton);
         buttonPanel.add(stopButton);
         buttonPanel.add(startAllButton);
         buttonPanel.add(stopAllButton);
         buttonPanel.add(addMappingButton);
+        buttonPanel.add(deleteMappingButton);
+        buttonPanel.add(renameEnvironmentButton);
 
         // 中间面板包含表格和日志
         JPanel centerPanel = new JPanel(new BorderLayout(0, 10));
